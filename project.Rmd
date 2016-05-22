@@ -1,0 +1,128 @@
+---
+title: "Prediction of Exercise Quality using Machine Learning Techniques"
+author: "Kushlendra Mishra"
+date: "22 May 2016"
+output: html_document
+---
+The aim of this experiment is to build a quality prediction model from the training data set for weight lifting exercise and use the model to predict the exercise quality for the test-data set. The data set consists of accelerometer, gyroscope and magnetometer measurements from sensors mounted at users' glove, forearm, lumbar belt and dumbbell. Please refer to the original study [here](http://groupware.les.inf.puc-rio.br/har) for more details on the data and the original experiment.
+
+##Executive summary
+We will first do some preliminary analysis on the training data.Then we will go through the model fitting and comparisons. Finally, we will conclude the study with some discussion.
+
+##Preliminary analysis
+Each record in the training data consists of three axes readings from accelerometer, gyroscope and magnetometer from sensors placed at four different measurement points and sampled at a frequency of 45 Hz. Also, there are columns for several different covariates, but these were computed based on a sliding window approach, hence they are available only for a few rows. Since the testing data set doesn't have readings for these covariates, it doesn't help to include them in the model. 
+
+The rows with the covariate values are still useful for doing  exploratory analysis. The average values eliminate some of the measurement noise, so we get to look at more reliable results if we plot these variables. We can expect that sensor data from the hands (gloves, dumbbell and arm) will have the highest effect on the classification of outcome. In order to keep this analysis short, we will only look at the linear acceleration variables and see if can learn something.
+
+We have plotted the total acceleration variables from the sensors below for some of the possible combinations and colored the points with the outcome (*classe*). The belt accelaration is clearly clustered at 5 and 20. Unfortunately, it is difficult to draw any general conclusions from this analysis. Since there are a large number of variables, and we have to be brief, we can't do any further analysis. But if we proceed along similar lines we may discover some important patterns. 
+
+```{r, fig.height=8, fig.width=8, echo = FALSE, warning=FALSE}
+library(ggplot2)
+library(cowplot)
+indata <- read.csv(file = "pml-training-newwin_only.csv", header = TRUE)
+g = ggplot(indata, aes(x = total_accel_belt, y = total_accel_dumbbell, colour = classe)) 
+g = g + geom_point()
+g1 = g + xlab("Total belt acceleration") + ylab("Total dumbbell acceleration")
+g = ggplot(indata, aes(x = total_accel_belt, y = total_accel_forearm, colour = classe)) 
+g = g + geom_point()
+g2 = g + xlab("Total belt acceleration") + ylab("Total forearm acceleration")
+g = ggplot(indata, aes(x = total_accel_belt, y = total_accel_arm, colour = classe)) 
+g = g + geom_point()
+g3 = g + xlab("Total belt acceleration") + ylab("Total arm acceleration")
+g = ggplot(indata, aes(x = total_accel_dumbbell, y = total_accel_forearm, colour = classe)) 
+g = g + geom_point()
+g4 = g + xlab("Total dumbbell acceleration") + ylab("Total forearm acceleration")
+plot_grid(g1, g2, g3, g4, ncol = 2, align = 'v', labels = c("A", "B", "C", "D"))
+```
+
+##Model fitting and comparison
+The training data has a large number of covariate variables, viz. kurtosis, skewness, max, min,amplitude, variance, average and standard deviation derived from the raw measurements. However, these
+features were calculated in a sliding window fashion and are not
+available for a majority of the records. The testing data set also
+doesn't have these variables, so the prediction model also can't have
+them. Therefor, I decided to exclude these variables from our model
+fitting.
+
+I partitioned the training data set into 75% training data set and 25%
+test data set based on the *classe* since we didn't have any separate
+data set for checking out of sample evaluation. First I tried to fit a
+generalized linear model but R gave an error which I was unable to
+resolve. I then tried linear descriminant analysis and that also
+reported similar error. Next I tried random forest model and this
+worked. I first started with variables from one sensor only and
+gradually added more variables. To acheive the required accuracy of
+over 99% I had to add the variables from all the sensor locations. I
+also tried boosting with trees, but that had somewhat lower accuracy of
+95%.
+
+##Conclusion
+I applied prediction with both the random forest model and the boosting with trees model. Both these models gave the same prediction so, that gives us more confidence over the results. All the predictions came out to be true in the quiz submission. The code I used for modelling is shown below.
+
+
+```{r, echo = TRUE, eval=FALSE}
+library(caret)
+library(lubridate)
+library(parallel)
+library(doParallel)
+
+cluster <- makeCluster(detectCores() -1)
+registerDoParallel(cluster)
+
+fitControl <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+inputDir <- "./"
+infile   <- "pml-training.csv"
+
+inputPath <- file.path(inputDir, infile)
+
+inputData <- read.csv(file = inputPath, header = TRUE, row.names = 1)
+
+infile2  <- "pml-testing.csv"
+inputPath2 <- file.path(inputDir, infile2)
+evalData <- read.csv(file = inputPath2, header = TRUE, row.names = 1)
+
+
+
+inputData$cvtd_timestamp <- dmy_hm(inputData$cvtd_timestamp)
+
+derivedFeatPatterns <- c("kurtosis", "skewness", "max", "min", "min", "amplitude", "var", "avg", "stddev")
+
+derivedFeatInd <- NULL
+allVars <- names(inputData)
+
+for(featPattern in derivedFeatPatterns) {
+    derivedFeatInd <- append(derivedFeatInd, grep(featPattern, allVars))
+}
+
+derivedFeatInd <- sort(derivedFeatInd)
+
+# remove derived features from the data set
+inputData <- inputData[, -derivedFeatInd]
+
+inTrain <- createDataPartition(inputData$classe, p=0.75, list = FALSE)
+
+training <- inputData[inTrain,]
+testing     <- inputData[-inTrain,]
+
+allVars <- names(inputData)
+
+predVarIndices <- NULL
+
+# for variable selection. 
+for (varPattern in c("belt", "arm", "dumbbell")) {
+    predVarIndices <- append(predVarIndices, grep(varPattern, allVars))
+}
+
+predVars <- allVars[predVarIndices]
+
+mfit <- train(as.formula(paste("classe ~ ", paste(predVars, collapse = " + "))) , data = training[,-1], method = "rf", trControl = fitControl)
+# mfit <- train(as.formula(paste("classe ~ ", paste(predVars, collapse = " + "))) , data = training[,-1], method = "gbm", trControl = fitControl)
+mpred <- predict(mfit, testing)
+
+
+cmresults <- confusionMatrix(mpred, testing$classe)
+
+evalPred <- predict(mfit, evalData)
+print(evalPred)
+```
+---
